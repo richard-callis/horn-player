@@ -38,8 +38,14 @@ def ffmpeg_cmd(src, downmix="quad", seek=0.0, lead_silence_ms=900):
     fc = f"[0:a]aformat=channel_layouts=stereo,{DOWNMIX[downmix]}"
     if lead_silence_ms:
         fc += f",adelay={lead_silence_ms}:all=1"
+    if not is_url(src):
+        # Trailing silence: the horn only plays what's buffered once more audio pushes it out,
+        # so without this the last word of a clip gets cut off.
+        fc += ",apad=pad_dur=1"
     fc += "[out]"
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin"]
+    # One thread: a file transcodes faster than real time at first, and a multi-threaded burst
+    # can exhaust the pod's CPU quota and stall the frame pacing alongside it.
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "1"]
     if is_url(src):
         # Keep URL sources to plain HTTP(S) so a playlist response can't redirect ffmpeg to file:// etc.
         # -rw_timeout (microseconds) makes a stalled connection fail instead of hanging forever.
@@ -50,7 +56,7 @@ def ffmpeg_cmd(src, downmix="quad", seek=0.0, lead_silence_ms=900):
         if seek > 0:
             cmd += ["-ss", f"{seek:.2f}"]
     cmd += ["-i", src, "-filter_complex", fc, "-map", "[out]", "-c:a", "aac", "-profile:a", "aac_low",
-            "-ar", "24000", "-ac", "1", "-b:a", "32k", "-f", "adts", "pipe:1"]
+            "-ar", "24000", "-ac", "1", "-b:a", "32k", "-filter_complex_threads", "1", "-f", "adts", "pipe:1"]
     return cmd
 
 

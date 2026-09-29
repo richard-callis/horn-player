@@ -290,6 +290,7 @@ class SpeakerPlayer:
         """Pace src's frames to the speaker; True if it played to the end, False if preempted.
         Stop/interrupt requests are honoured within POLL seconds even while the source stalls."""
         t0, n = None, 0
+        underruns, worst = 0, 0.0         # frames sent after the speaker's buffer had run dry
         gen = audio.adts_frames(src, self.downmix, seek)
         pending = None
         try:
@@ -312,6 +313,9 @@ class SpeakerPlayer:
                 if t0 is None:
                     t0 = time.monotonic()
                 delay = t0 + n * audio.FRAME_DT - LEAD - time.monotonic()
+                if -delay > LEAD:                 # later than the frame's own play-out time
+                    underruns += 1
+                    worst = max(worst, -delay - LEAD)
                 if delay > 0:
                     await asyncio.sleep(delay)
                 elif delay < -2:          # source stalled (radio rebuffer); resync the clock
@@ -330,6 +334,10 @@ class SpeakerPlayer:
                 pending.cancel()
                 await asyncio.gather(pending, return_exceptions=True)
             await gen.aclose()
+            if n:
+                log.info("stream %s on %s: %d frames (%.1f s), %d late past the buffer (worst %d ms)",
+                         Path(src).name if not audio.is_url(src) else src, self.speaker["name"],
+                         n, n * audio.FRAME_DT, underruns, worst * 1000)
 
     async def _close_ws(self):
         if self._ws is not None:

@@ -280,11 +280,17 @@ async function recStart() {
   }
   rec.recorder.ondataavailable = (e) => e.data.size && rec.chunks.push(e.data);
   rec.recorder.onstop = recFinished;
+  $('#rec-label').textContent = 'Starting…';
+  $('#rec-take').hidden = true;
+  // Phones take a moment to actually start capturing; only say "recording" once they have.
+  rec.recorder.onstart = () => {
+    rec.started = Date.now();
+    $('#rec').classList.add('recording');
+    $('#rec-label').textContent = 'Stop';
+    $('#rec-hint').textContent = 'Recording, speak now.';
+  };
   rec.recorder.start();
   rec.started = Date.now();
-  $('#rec').classList.add('recording');
-  $('#rec-label').textContent = 'Stop';
-  $('#rec-take').hidden = true;
   rec.timer = setInterval(() => {
     const sec = (Date.now() - rec.started) / 1000;
     recTime(sec);
