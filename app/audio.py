@@ -7,9 +7,10 @@ FRAME_DT = 1024 / 24000.0  # seconds of audio per AAC-LC frame at 24 kHz
 
 # Stereo -> mono. An equal L+R sum ("mid") cancels anything mixed out of phase between the
 # channels, which on wide mixes takes vocals/choir with it. "blend" weights the channels unequally,
-# so such content drops ~9 dB instead of vanishing, with no phase tricks: an earlier 90-degree
+# so such content drops ~10 dB instead of vanishing, with no phase tricks: an earlier 90-degree
 # phase-shift mix comb-filtered everything (notches up to 50 dB), which garbled speech.
-# Mono sources skip this entirely (see ffmpeg_cmd).
+# Mono sources skip this entirely (see ffmpeg_cmd), which also keeps them at their own level
+# rather than the -3 dB that upmixing to stereo first would cost.
 DOWNMIX = {
     "blend": "pan=mono|c0=0.65*c0+0.35*c1",
     "mid": "pan=mono|c0=0.5*c0+0.5*c1",
@@ -92,7 +93,14 @@ async def channels(path):
         "ffprobe", "-v", "error", *LOCAL_INPUT, "-select_streams", "a:0", "-show_entries",
         "stream=channels", "-of", "csv=p=0", str(path),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-    out, _ = await proc.communicate()
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), 10)
+    except asyncio.TimeoutError:
+        return 0
+    finally:
+        if proc.returncode is None:       # timed out or cancelled
+            proc.kill()
+            await proc.wait()
     try:
         return int(out.split()[0])
     except (ValueError, IndexError):

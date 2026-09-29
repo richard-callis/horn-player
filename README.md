@@ -14,7 +14,7 @@ for push-to-talk. Ubiquiti can change it in any release.
 - `app/audio.py`: ffmpeg transcodes any file or stream to AAC-LC/ADTS, 24 kHz mono, one
   frame per websocket message, paced at 1024/24000 s per frame. Stereo is folded to mono
   with unequal channel weights (65/35) so out-of-phase vocals are
-  reduced rather than cancelled; mono sources pass through untouched.
+  reduced by about 10 dB rather than cancelled; mono sources pass through untouched.
 - `app/player.py`: one engine per speaker. Clips and announcements interrupt the music,
   which then resumes (playlists at the same point in the track).
 - `app/tts.py`: announcements are rendered locally with [Piper](https://github.com/rhasspy/piper)

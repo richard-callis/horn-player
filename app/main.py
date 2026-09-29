@@ -131,7 +131,11 @@ async def lifespan(app):
         for name, url in DEFAULT_STATIONS:
             db.x("INSERT INTO sources (kind, name, target) VALUES ('station', ?, ?)", (name, url))
     protect = Protect(os.environ["UNIFI_HOST"], os.environ["UNIFI_USER"], os.environ["UNIFI_PASS"])
-    hub = Hub(protect, db, os.environ.get("DOWNMIX", "blend"))
+    downmix = os.environ.get("DOWNMIX", "blend")
+    if downmix not in audio.DOWNMIX:
+        log.warning("unknown DOWNMIX=%s (quad was removed); using blend", downmix)
+        downmix = "blend"
+    hub = Hub(protect, db, downmix)
     tasks = [asyncio.create_task(hub.discover_forever()), asyncio.create_task(Scheduler(db, hub).run())]
     yield
     for t in tasks:
