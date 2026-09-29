@@ -10,7 +10,7 @@ from app.db import DB
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DATA", tmp_path)
     main.db = DB(tmp_path / "t.db")
-    main.hub = main.Hub(None, main.db, "quad")
+    main.hub = main.Hub(None, main.db, "blend")
     return TestClient(main.app, headers={"X-authentik-username": "tester"})  # no lifespan
 
 

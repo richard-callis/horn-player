@@ -53,3 +53,20 @@ def test_ffmpeg_cmd_url_is_protocol_restricted_and_file_seeks():
     f = ffmpeg_cmd("/data/music/a.mp3", seek=12.5)
     assert f[f.index("-ss") + 1] == "12.50"
     assert abs(FRAME_DT - 0.042667) < 1e-5
+
+
+def test_mono_sources_skip_the_downmix():
+    assert "pan=" not in " ".join(ffmpeg_cmd("/data/x.wav", mono=True))
+    assert "pan=mono|c0=0.65*c0+0.35*c1" in " ".join(ffmpeg_cmd("/data/x.wav"))
+    assert "aphaseshift" not in " ".join(ffmpeg_cmd("/data/x.wav"))
+
+
+def test_channels_detects_mono_and_stereo(tmp_path):
+    import asyncio
+    import subprocess
+    from app.audio import channels
+    for n in (1, 2):
+        p = tmp_path / f"c{n}.wav"
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "sine=duration=0.2",
+                        "-ac", str(n), str(p)], check=True)
+        assert asyncio.run(channels(p)) == n

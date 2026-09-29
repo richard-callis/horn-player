@@ -68,7 +68,7 @@ class Interrupt:
 
 
 class SpeakerPlayer:
-    def __init__(self, protect, speaker, downmix="quad"):
+    def __init__(self, protect, speaker, downmix="blend"):
         self.protect = protect
         self.speaker = speaker            # dict with id, mac, name
         self.downmix = downmix

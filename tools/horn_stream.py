@@ -133,17 +133,16 @@ def playlist(source, shuffle, loop):
 
 
 # Stereo -> mono for the horn. "mid" (L+R) cancels anything mixed out of phase between the
-# channels, which on wide mixes can take vocals/choir with it; "quad" shifts R by 90 degrees
-# first so nothing cancels; "left" just drops the right channel.
+# channels, which on wide mixes can take vocals/choir with it; "blend" weights them 65/35 instead;
+# "left" just drops the right channel.
 DOWNMIX = {
-    "quad": "channelsplit=channel_layout=stereo[l][r];[r]aphaseshift=shift=0.5[rs];"
-            "[l][rs]amix=inputs=2:normalize=0,volume=0.5",
+    "blend": "pan=mono|c0=0.65*c0+0.35*c1",
     "mid": "pan=mono|c0=0.5*c0+0.5*c1",
     "left": "pan=mono|c0=c0",
 }
 
 
-def adts_frames(src, gain_db, downmix="quad"):
+def adts_frames(src, gain_db, downmix="blend"):
     """Transcode src with ffmpeg and yield AAC-LC ADTS frames (24 kHz mono) as they are produced."""
     fc = f"[0:a]aformat=channel_layouts=stereo,{DOWNMIX[downmix]},adelay=900:all=1"
     if gain_db:
@@ -191,8 +190,8 @@ def main():
     ap.add_argument("--loop", action="store_true")
     ap.add_argument("--volume", type=int, help="set speaker volume 0-100 before playing")
     ap.add_argument("--gain-db", type=float, default=0, help="software gain applied by ffmpeg")
-    ap.add_argument("--downmix", choices=sorted(DOWNMIX), default="quad",
-                    help="stereo-to-mono method (default quad; mid can cancel vocals on wide mixes)")
+    ap.add_argument("--downmix", choices=sorted(DOWNMIX), default="blend",
+                    help="stereo-to-mono method (default blend; mid can cancel vocals on wide mixes)")
     ap.add_argument("--list", action="store_true", help="list speakers and exit")
     args = ap.parse_args()
 

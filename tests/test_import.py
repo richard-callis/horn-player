@@ -46,7 +46,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "ALLOW_PRIVATE_STREAMS", True)
     (tmp_path / "clips").mkdir()
     main.db = DB(tmp_path / "t.db")
-    main.hub = main.Hub(None, main.db, "quad")
+    main.hub = main.Hub(None, main.db, "blend")
     return TestClient(main.app, headers={"X-authentik-username": "tester"})
 
 

@@ -5,11 +5,13 @@ import json
 
 FRAME_DT = 1024 / 24000.0  # seconds of audio per AAC-LC frame at 24 kHz
 
-# Stereo -> mono. A plain L+R sum cancels anything mixed out of phase between the channels,
-# which on wide mixes takes vocals/choir with it; shifting R by 90 degrees first avoids that.
+# Stereo -> mono. An equal L+R sum ("mid") cancels anything mixed out of phase between the
+# channels, which on wide mixes takes vocals/choir with it. "blend" weights the channels unequally,
+# so such content drops ~9 dB instead of vanishing, with no phase tricks: an earlier 90-degree
+# phase-shift mix comb-filtered everything (notches up to 50 dB), which garbled speech.
+# Mono sources skip this entirely (see ffmpeg_cmd).
 DOWNMIX = {
-    "quad": "channelsplit=channel_layout=stereo[l][r];[r]aphaseshift=shift=0.5[rs];"
-            "[l][rs]amix=inputs=2:normalize=0,volume=0.5",
+    "blend": "pan=mono|c0=0.65*c0+0.35*c1",
     "mid": "pan=mono|c0=0.5*c0+0.5*c1",
     "left": "pan=mono|c0=c0",
 }
@@ -34,8 +36,8 @@ def is_url(src):
     return src.startswith(("http://", "https://"))
 
 
-def ffmpeg_cmd(src, downmix="quad", seek=0.0, lead_silence_ms=900):
-    fc = f"[0:a]aformat=channel_layouts=stereo,{DOWNMIX[downmix]}"
+def ffmpeg_cmd(src, downmix="blend", seek=0.0, lead_silence_ms=900, mono=False):
+    fc = "[0:a]anull" if mono else f"[0:a]aformat=channel_layouts=stereo,{DOWNMIX[downmix]}"
     if lead_silence_ms:
         fc += f",adelay={lead_silence_ms}:all=1"
     if not is_url(src):
@@ -84,10 +86,24 @@ async def _drain(stream, tail):
         tail.append(line.decode(errors="replace").rstrip())
 
 
-async def adts_frames(src, downmix="quad", seek=0.0, lead_silence_ms=900):
-    """Yield ADTS frames from ffmpeg as they are produced; the ffmpeg process dies with the generator."""
+async def channels(path):
+    """Channel count of a local file's first audio stream (0 if unknown)."""
     proc = await asyncio.create_subprocess_exec(
-        *ffmpeg_cmd(src, downmix, seek, lead_silence_ms),
+        "ffprobe", "-v", "error", *LOCAL_INPUT, "-select_streams", "a:0", "-show_entries",
+        "stream=channels", "-of", "csv=p=0", str(path),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    out, _ = await proc.communicate()
+    try:
+        return int(out.split()[0])
+    except (ValueError, IndexError):
+        return 0
+
+
+async def adts_frames(src, downmix="blend", seek=0.0, lead_silence_ms=900):
+    """Yield ADTS frames from ffmpeg as they are produced; the ffmpeg process dies with the generator."""
+    mono = not is_url(src) and await channels(src) == 1
+    proc = await asyncio.create_subprocess_exec(
+        *ffmpeg_cmd(src, downmix, seek, lead_silence_ms, mono=mono),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     tail = collections.deque(maxlen=5)
     drain = asyncio.create_task(_drain(proc.stderr, tail))

@@ -36,7 +36,7 @@ def fake_source(frames_by_src, stall=()):
     sources mapped to None fail like an unreadable file."""
     seeks = []
 
-    async def gen(src, downmix="quad", seek=0.0, lead_silence_ms=900):
+    async def gen(src, downmix="blend", seek=0.0, lead_silence_ms=900):
         seeks.append((src, seek))
         n = frames_by_src.get(src, 5)
         if n is None:
