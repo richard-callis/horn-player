@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Horn Player</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="style.css">
+<script>
+  (function () {
+    var t = null;
+    try { t = localStorage.getItem('theme'); } catch (e) {}
+    if (!t) t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    document.documentElement.dataset.theme = t;
+  })();
+</script>
+</head>
+<body>
+<header class="masthead">
+  <div class="wordmark">Horn<span>Player</span></div>
+  <nav class="nav" id="nav">
+    <a href="#speakers">Speakers</a>
+    <a href="#soundboard">Soundboard</a>
+    <a href="#announce">Announce</a>
+    <a href="#schedules">Schedules</a>
+    <a href="#library">Library</a>
+    <a href="#activity">Activity</a>
+  </nav>
+  <div class="right">
+    <span id="user"></span>
+    <button class="icon-btn" id="theme" title="Toggle theme" aria-label="Toggle theme"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:block"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor"/></svg></button>
+  </div>
+</header>
+
+<main>
+  <div class="alert" id="alert" hidden></div>
+
+  <div data-page="speakers">
+    <div class="page-head">
+      <div><h1>Speakers</h1><p>What each Protect speaker is playing right now.</p></div>
+      <button class="btn secondary sm" id="refresh">Rediscover speakers</button>
+    </div>
+    <div class="grid" id="speakers"></div>
+  </div>
+
+  <div data-page="soundboard" hidden>
+    <div class="page-head">
+      <div><h1>Soundboard</h1><p>Fire a clip; whatever was playing picks up again afterwards.</p></div>
+      <label class="field" style="min-width:200px"><span>Play on</span><select id="sb-target"></select></label>
+    </div>
+    <div class="pads" id="pads"></div>
+  </div>
+
+  <div data-page="announce" hidden>
+    <div class="page-head"><div><h1>Announce</h1><p>Type it, the horn says it.</p></div></div>
+    <div class="card stack" style="max-width:720px">
+      <label class="field"><span>Message</span><textarea id="tts-text" maxlength="500" placeholder="Slow down ya jagoff"></textarea></label>
+      <div class="row">
+        <label class="field"><span>Speakers</span><select id="tts-target"></select></label>
+        <label class="field"><span>Voice</span>
+          <select id="tts-voice">
+            <option value="piper">Natural (local)</option>
+            <option value="protect">Protect built-in</option>
+          </select>
+        </label>
+        <button class="btn primary" id="tts-go">Say it</button>
+      </div>
+    </div>
+  </div>
+
+  <div data-page="schedules" hidden>
+    <div class="page-head">
+      <div><h1>Schedules</h1><p>Start a station or playlist automatically. A schedule only stops what it started.</p></div>
+      <button class="btn primary" id="sched-new">New schedule</button>
+    </div>
+    <div class="card table-wrap"><table>
+      <thead><tr><th>Name</th><th>Plays</th><th>On</th><th>Days</th><th>Time</th><th>Dates</th><th>Status</th><th></th></tr></thead>
+      <tbody id="schedules"></tbody>
+    </table></div>
+  </div>
+
+  <div data-page="library" hidden>
+    <div class="page-head"><div><h1>Library</h1><p>Stations, playlists and sound clips.</p></div></div>
+    <section>
+      <div class="card-head"><div class="eyebrow">Stations</div></div>
+      <div class="card stack">
+        <div class="table-wrap"><table><thead><tr><th>Name</th><th>Stream URL</th><th></th></tr></thead><tbody id="stations"></tbody></table></div>
+        <form class="row" id="station-form">
+          <label class="field"><span>Name</span><input name="name" required maxlength="80"></label>
+          <label class="field" style="flex:3 1 280px"><span>Stream URL</span><input name="url" type="url" required placeholder="https://…"></label>
+          <button class="btn secondary">Add station</button>
+        </form>
+      </div>
+    </section>
+    <section>
+      <div class="card-head"><div class="eyebrow">Playlists</div></div>
+      <div class="grid" id="playlists"></div>
+      <form class="row" id="playlist-form" style="margin-top:16px">
+        <label class="field" style="max-width:320px"><span>New playlist</span><input name="name" required maxlength="80"></label>
+        <button class="btn secondary">Create</button>
+      </form>
+    </section>
+    <section>
+      <div class="card-head"><div class="eyebrow">Clips</div></div>
+      <div class="card stack">
+        <div class="table-wrap"><table><thead><tr><th>Name</th><th>Preview</th><th></th></tr></thead><tbody id="clips"></tbody></table></div>
+        <form class="row" id="clip-form">
+          <label class="field"><span>Name</span><input name="name" required maxlength="80"></label>
+          <label class="field" style="flex:2 1 240px"><span>Audio file</span><input name="file" type="file" accept="audio/*" required></label>
+          <button class="btn secondary">Upload clip</button>
+        </form>
+      </div>
+    </section>
+  </div>
+
+  <div data-page="activity" hidden>
+    <div class="page-head"><div><h1>Activity</h1><p>Who did what, most recent first.</p></div></div>
+    <div class="card table-wrap"><table>
+      <thead><tr><th>When</th><th>Who</th><th>What</th></tr></thead><tbody id="activity"></tbody>
+    </table></div>
+  </div>
+</main>
+
+<div class="overlay" id="modal" hidden>
+  <form class="modal" id="sched-form">
+    <header><span id="sched-title">New schedule</span><button type="button" class="icon-btn" data-close>×</button></header>
+    <div class="body stack">
+      <label class="field"><span>Name</span><input name="name" required maxlength="80" placeholder="Trick-or-treat"></label>
+      <div class="row">
+        <label class="field"><span>Plays</span><select name="source_id" required></select></label>
+        <label class="field"><span>On</span><select name="speaker_id" required></select></label>
+      </div>
+      <div class="field"><span>Days</span><div class="days" id="sched-days"></div></div>
+      <div class="row">
+        <label class="field"><span>From</span><input name="start_time" type="time" required></label>
+        <label class="field"><span>Until</span><input name="end_time" type="time" required></label>
+      </div>
+      <div class="row">
+        <label class="field"><span>First date (optional)</span><input name="start_date" type="date"></label>
+        <label class="field"><span>Last date (optional)</span><input name="end_date" type="date"></label>
+      </div>
+      <label class="checks"><label><input type="checkbox" name="enabled" checked> Enabled</label></label>
+    </div>
+    <footer><button type="button" class="btn secondary" data-close>Cancel</button><button class="btn primary">Save</button></footer>
+  </form>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

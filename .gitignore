@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+horn.env
+*.env
+data/
+voices/
+sfx/
+music/

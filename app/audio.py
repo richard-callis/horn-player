@@ -1,0 +1,91 @@
+"""ffmpeg transcoding to the horn's talkback format: AAC-LC in ADTS, 24 kHz mono."""
+import asyncio
+import json
+
+FRAME_DT = 1024 / 24000.0  # seconds of audio per AAC-LC frame at 24 kHz
+
+# Stereo -> mono. A plain L+R sum cancels anything mixed out of phase between the channels,
+# which on wide mixes takes vocals/choir with it; shifting R by 90 degrees first avoids that.
+DOWNMIX = {
+    "quad": "channelsplit=channel_layout=stereo[l][r];[r]aphaseshift=shift=0.5[rs];"
+            "[l][rs]amix=inputs=2:normalize=0,volume=0.5",
+    "mid": "pan=mono|c0=0.5*c0+0.5*c1",
+    "left": "pan=mono|c0=c0",
+}
+
+
+def is_url(src):
+    return src.startswith(("http://", "https://"))
+
+
+def ffmpeg_cmd(src, downmix="quad", seek=0.0, lead_silence_ms=900):
+    fc = f"[0:a]aformat=channel_layouts=stereo,{DOWNMIX[downmix]}"
+    if lead_silence_ms:
+        fc += f",adelay={lead_silence_ms}:all=1"
+    fc += "[out]"
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin"]
+    if is_url(src):
+        # Keep URL sources to plain HTTP(S) so a playlist response can't redirect ffmpeg to file:// etc.
+        cmd += ["-protocol_whitelist", "http,https,tcp,tls,crypto",
+                "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "10"]
+    elif seek > 0:
+        cmd += ["-ss", f"{seek:.2f}"]
+    cmd += ["-i", src, "-filter_complex", fc, "-map", "[out]", "-c:a", "aac", "-profile:a", "aac_low",
+            "-ar", "24000", "-ac", "1", "-b:a", "32k", "-f", "adts", "pipe:1"]
+    return cmd
+
+
+def split_adts(buf):
+    """Split complete ADTS frames off the front of buf; return (frames, remainder)."""
+    frames, i, n = [], 0, len(buf)
+    while i + 7 <= n:
+        if buf[i] != 0xFF or (buf[i + 1] & 0xF0) != 0xF0:
+            i += 1
+            continue
+        flen = ((buf[i + 3] & 0x03) << 11) | (buf[i + 4] << 3) | (buf[i + 5] >> 5)
+        if flen < 7:
+            i += 1
+            continue
+        if i + flen > n:
+            break
+        frames.append(buf[i:i + flen])
+        i += flen
+    return frames, buf[i:]
+
+
+async def adts_frames(src, downmix="quad", seek=0.0, lead_silence_ms=900):
+    """Yield ADTS frames from ffmpeg as they are produced; the ffmpeg process dies with the generator."""
+    proc = await asyncio.create_subprocess_exec(
+        *ffmpeg_cmd(src, downmix, seek, lead_silence_ms),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    buf = b""
+    try:
+        while True:
+            chunk = await proc.stdout.read(4096)
+            if not chunk:
+                break
+            frames, buf = split_adts(buf + chunk)
+            for f in frames:
+                yield f
+        await proc.wait()
+        if proc.returncode:
+            err = (await proc.stderr.read()).decode(errors="replace").strip()
+            raise RuntimeError(f"ffmpeg failed on {src}: {err[:300]}")
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+
+
+async def probe_title(path):
+    """Best-effort 'Artist - Title' from a file's tags, falling back to None."""
+    proc = await asyncio.create_subprocess_exec(
+        "ffprobe", "-hide_banner", "-loglevel", "error", "-show_entries", "format_tags=artist,title",
+        "-of", "json", path, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    out, _ = await proc.communicate()
+    try:
+        tags = {k.lower(): v for k, v in json.loads(out).get("format", {}).get("tags", {}).items()}
+    except ValueError:
+        return None
+    parts = [tags.get("artist"), tags.get("title")]
+    return " - ".join(p for p in parts if p) or None
