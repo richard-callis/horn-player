@@ -10,6 +10,7 @@ import random
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import websockets
 
@@ -289,7 +290,7 @@ class SpeakerPlayer:
     async def _stream(self, src, seek=0.0, stop_on_preempt=True):
         """Pace src's frames to the speaker; True if it played to the end, False if preempted.
         Stop/interrupt requests are honoured within POLL seconds even while the source stalls."""
-        t0, n = None, 0
+        t0, n, sent = None, 0, 0
         underruns, worst = 0, 0.0         # frames sent after the speaker's buffer had run dry
         gen = audio.adts_frames(src, self.downmix, seek)
         pending = None
@@ -329,15 +330,16 @@ class SpeakerPlayer:
                         raise TalkbackRefused(code) from None
                     log.warning("talkback closed (%s), reconnecting", code)
                 n += 1
+                sent += 1
         finally:
             if pending is not None:
                 pending.cancel()
                 await asyncio.gather(pending, return_exceptions=True)
             await gen.aclose()
-            if n:
+            if sent:
+                what = urlsplit(src).hostname if audio.is_url(src) else Path(src).name  # no URL tokens
                 log.info("stream %s on %s: %d frames (%.1f s), %d late past the buffer (worst %d ms)",
-                         Path(src).name if not audio.is_url(src) else src, self.speaker["name"],
-                         n, n * audio.FRAME_DT, underruns, worst * 1000)
+                         what, self.speaker["name"], sent, sent * audio.FRAME_DT, underruns, worst * 1000)
 
     async def _close_ws(self):
         if self._ws is not None:

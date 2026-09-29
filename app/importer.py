@@ -1,10 +1,19 @@
 """Fetch a clip from a link: a direct audio file, or any page yt-dlp understands (YouTube, pages
 embedding <audio>, ...). Sites behind Cloudflare bot protection (myinstants and friends) refuse
-server-side downloads; the UI tells people to download those on their phone and upload instead."""
+server-side downloads; the UI tells people to download those on their phone and upload instead.
+
+yt-dlp is only used to *resolve* a page to a media URL (`-j`); the bytes are always fetched by
+_download, which checks every redirect hop against private addresses and enforces the size and
+time caps. Formats yt-dlp can only fetch in fragments (HLS/DASH) are refused rather than handed to
+yt-dlp's own downloader. This is still best effort against SSRF: DNS can change between the check
+and the connection."""
 import asyncio
 import ipaddress
+import json
 import os
+import shutil
 import socket
+import sys
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
@@ -14,12 +23,20 @@ from . import audio
 
 MAX_BYTES = int(os.environ.get("MAX_IMPORT_MB", "50")) * 1024 * 1024
 MAX_SECONDS = int(os.environ.get("MAX_IMPORT_SECONDS", "600"))   # longest clip we'll import
-TIMEOUT = 180
-YTDLP = os.environ.get("YTDLP_BIN", "yt-dlp")
+TIMEOUT = 180                                                     # per import, all steps
+# Default to the yt-dlp installed next to this interpreter (the venv/bin or /usr/local/bin).
+YTDLP = os.environ.get("YTDLP_BIN") or str(Path(sys.executable).with_name("yt-dlp"))
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128 Safari/537.36"
+BLOCKED = "that site blocks downloads from servers; download the sound on your phone and upload it instead"
+
+_one_at_a_time = asyncio.Semaphore(1)   # yt-dlp + ffmpeg per import; keep memory for playback
 
 
 class ImportFailed(Exception):
+    pass
+
+
+class ImportBusy(ImportFailed):
     pass
 
 
@@ -42,10 +59,11 @@ async def _check_public(url, allow_private):
         raise ImportFailed("links to private or internal addresses aren't allowed")
 
 
-async def _direct(url, dest: Path, allow_private):
-    """Download url if it is itself audio/video. Returns False if it's a web page instead.
-    Redirects are followed by hand so every hop gets the public-address check."""
-    async with httpx.AsyncClient(timeout=30, headers={"User-Agent": UA}) as c:
+async def _download(url, dest: Path, allow_private, headers=None, require_media=True):
+    """Fetch url into dest. Returns False (and writes nothing) if it turns out to be a web page
+    and require_media is set. Redirects are followed by hand so every hop is checked."""
+    hdrs = {"User-Agent": UA, **(headers or {})}
+    async with httpx.AsyncClient(timeout=30, headers=hdrs) as c:
         for _ in range(5):
             await _check_public(url, allow_private)
             async with c.stream("GET", url) as r:
@@ -53,12 +71,14 @@ async def _direct(url, dest: Path, allow_private):
                     url = urljoin(url, r.headers["location"])
                     continue
                 if r.status_code == 403 and "cloudflare" in r.headers.get("server", "").lower():
-                    raise ImportFailed("that site blocks downloads from servers; download the sound "
-                                       "on your phone and upload it instead")
+                    raise ImportFailed(BLOCKED)
                 if not r.is_success:
                     raise ImportFailed(f"the link returned HTTP {r.status_code}")
+                if any(k.lower().startswith("icy-") for k in r.headers):
+                    raise ImportFailed("that's a live radio stream; add it under Library → Stations instead")
                 ctype = r.headers.get("content-type", "").split(";")[0].strip().lower()
-                if not (ctype.startswith(("audio/", "video/")) or ctype == "application/octet-stream"):
+                if require_media and not (ctype.startswith(("audio/", "video/"))
+                                          or ctype == "application/octet-stream"):
                     return False
                 size = 0
                 with dest.open("wb") as out:
@@ -71,49 +91,66 @@ async def _direct(url, dest: Path, allow_private):
         raise ImportFailed("too many redirects")
 
 
-async def _ytdlp(url, workdir: Path):
-    """Let yt-dlp find the audio on a page. Returns the downloaded file."""
+async def _resolve(url, workdir: Path):
+    """Ask yt-dlp which media URL a page points at, without downloading anything."""
     proc = await asyncio.create_subprocess_exec(
-        YTDLP, "--no-playlist", "--no-progress", "--quiet", "--no-warnings",
-        "-f", "bestaudio/best", "--max-filesize", str(MAX_BYTES),
-        "--match-filter", f"duration <=? {MAX_SECONDS}",
-        "-o", str(workdir / "dl.%(ext)s"), "--", url,
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        YTDLP, "--ignore-config", "--no-cache-dir", "--no-plugin-dirs", "--no-playlist",
+        "--quiet", "--no-warnings", "-j", "-f", "bestaudio/best",
+        "--match-filter", f"!is_live & duration <=? {MAX_SECONDS} & filesize_approx <=? {MAX_BYTES}",
+        "--", url,
+        cwd=workdir, env={"PATH": os.environ.get("PATH", ""), "HOME": str(workdir)},
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
-        _, err = await asyncio.wait_for(proc.communicate(), TIMEOUT)
-    except asyncio.TimeoutError:
-        raise ImportFailed(f"the download took longer than {TIMEOUT} s") from None
+        out, err = await proc.communicate()
     finally:
-        if proc.returncode is None:
+        if proc.returncode is None:     # cancelled (e.g. by the overall timeout)
             proc.kill()
             await proc.wait()
-    files = [p for p in workdir.glob("dl.*") if not p.name.endswith(".part")]
-    if proc.returncode or not files:
-        msg = err.decode(errors="replace").strip().splitlines()
-        msg = msg[-1] if msg else ""
-        if "Unsupported URL" in msg:
+    lines = err.decode(errors="replace").strip().splitlines()
+    msg = lines[-1] if lines else ""
+    if proc.returncode or not out.strip():
+        if "Unsupported URL" in msg or not msg:
             raise ImportFailed("couldn't find any audio on that page")
         if "does not pass filter" in msg:
-            raise ImportFailed(f"that's longer than {MAX_SECONDS // 60} minutes")
+            raise ImportFailed(f"that's a live stream or longer than {MAX_SECONDS // 60} minutes; "
+                               "add it as a station instead")
         if "403" in msg or "Cloudflare" in msg:
-            raise ImportFailed("that site blocks downloads from servers; download the sound on "
-                               "your phone and upload it instead")
-        raise ImportFailed(msg.removeprefix("ERROR: ")[:200] or "download failed")
-    return files[0]
+            raise ImportFailed(BLOCKED)
+        raise ImportFailed(msg.removeprefix("ERROR: ")[:200])
+    info = json.loads(out.splitlines()[0])
+    if not info.get("url") or info.get("protocol", "https") not in ("http", "https"):
+        raise ImportFailed("that audio is only available as a segmented stream, which can't be imported")
+    return info["url"], info.get("http_headers") or {}
+
+
+async def _fetch(url, dest: Path, workdir: Path, allow_private):
+    await _check_public(url, allow_private)
+    raw = workdir / "media"
+    if not await _download(url, raw, allow_private):
+        media_url, headers = await _resolve(url, workdir)
+        await _download(media_url, raw, allow_private, headers=headers, require_media=False)
+    try:
+        await audio.to_m4a(raw, dest, max_seconds=MAX_SECONDS)
+    except audio.SourceError as e:
+        raise ImportFailed(f"couldn't read the download as audio ({e})"[:200]) from None
 
 
 async def fetch_clip(url, dest: Path, workdir: Path, allow_private=False):
-    """Download the audio behind url and store it at dest (.m4a)."""
-    workdir.mkdir(parents=True, exist_ok=True)
-    try:
-        await _check_public(url, allow_private)
-        raw = workdir / "direct"
-        got = raw if await _direct(url, raw, allow_private) else await _ytdlp(url, workdir)
+    """Download the audio behind url and store it at dest (.m4a). One import at a time."""
+    if _one_at_a_time.locked():
+        raise ImportBusy("another import is running; try again in a moment")
+    async with _one_at_a_time:
+        workdir.mkdir(parents=True, exist_ok=True)
         try:
-            await audio.to_m4a(got, dest, max_seconds=MAX_SECONDS)
-        except audio.SourceError as e:
-            raise ImportFailed(f"couldn't read the download as audio ({e})"[:200]) from None
-    finally:
-        for p in workdir.glob("*"):
-            p.unlink(missing_ok=True)
-        workdir.rmdir()
+            async with asyncio.timeout(TIMEOUT):
+                await _fetch(url, dest, workdir, allow_private)
+        except TimeoutError:
+            raise ImportFailed(f"the import took longer than {TIMEOUT} s") from None
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+
+def sweep(data_dir: Path):
+    """Remove work directories left behind by a restart mid-import."""
+    for d in data_dir.glob(".import-*"):
+        shutil.rmtree(d, ignore_errors=True)

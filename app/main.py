@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from . import audio
 from .db import DB
-from .importer import ImportFailed, fetch_clip, public_host
+from .importer import ImportBusy, ImportFailed, fetch_clip, public_host, sweep
 from .player import AUDIO_EXT, Interrupt, Music, SpeakerPlayer
 from .protect import Protect
 from .scheduler import Scheduler
@@ -122,6 +122,9 @@ async def lifespan(app):
     for d in ("music", "clips"):
         (DATA / d).mkdir(parents=True, exist_ok=True)
     shutil.rmtree(DATA / "once", ignore_errors=True)   # leftovers from play-once recordings
+    sweep(DATA)                                         # and from imports cut short by a restart
+    for f in (DATA / "clips").glob(".import-*"):
+        f.unlink(missing_ok=True)
     (DATA / "once").mkdir()
     db = DB(DATA / "horn-player.db")
     if not db.one("SELECT id FROM sources LIMIT 1"):
@@ -445,16 +448,22 @@ class ImportReq(BaseModel):
 @app.post("/api/clips/import")
 async def import_clip(body: ImportReq, request: Request):
     """Add a clip from a link: a direct audio file, YouTube, or a page embedding audio."""
-    sid = _insert("clip", body.name, "")
-    dest = DATA / "clips" / f"{sid}.m4a"
+    if db.one("SELECT id FROM sources WHERE kind = 'clip' AND name = ?", (body.name,)):
+        raise HTTPException(409, f"a clip named '{body.name}' already exists")
+    tag = uuid.uuid4().hex
+    tmp = DATA / "clips" / f".import-{tag}.m4a"
     try:
-        await fetch_clip(body.url, dest, DATA / f".import-{uuid.uuid4().hex}", ALLOW_PRIVATE_STREAMS)
-    except BaseException as e:
-        db.x("DELETE FROM sources WHERE id = ?", (sid,))
-        dest.unlink(missing_ok=True)
-        if isinstance(e, ImportFailed):
-            raise HTTPException(400, str(e))
-        raise
+        # The clip row only appears once the download has worked, so nothing half-imported shows.
+        await fetch_clip(body.url, tmp, DATA / f".import-{tag}", ALLOW_PRIVATE_STREAMS)
+        sid = _insert("clip", body.name, "")
+        dest = DATA / "clips" / f"{sid}.m4a"
+        tmp.replace(dest)
+    except ImportBusy as e:
+        raise HTTPException(429, str(e))
+    except ImportFailed as e:
+        raise HTTPException(400, str(e))
+    finally:
+        tmp.unlink(missing_ok=True)
     db.x("UPDATE sources SET target = ? WHERE id = ?", (str(dest), sid))
     audit(request, f"imported clip {body.name} from {body.url}")
     return {"id": sid}

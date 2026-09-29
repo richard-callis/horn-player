@@ -4,4 +4,5 @@ httpx==0.28.1
 websockets==17.1
 python-multipart==0.0.32
 piper-tts==1.8.0
-yt-dlp==2026.8.19
+yt-dlp[default]==2026.8.19
+deno==2.9.7

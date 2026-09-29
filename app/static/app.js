@@ -294,12 +294,19 @@ async function recStart() {
   $('#rec-take').hidden = true;
   // Phones take a moment to actually start capturing; only say "recording" once they have.
   rec.recorder.onstart = () => {
+    if (rec.recorder?.state !== 'recording') return;   // stopped again before it got going
     rec.started = Date.now();
     $('#rec').classList.add('recording');
     $('#rec-label').textContent = 'Stop';
     $('#rec-hint').textContent = 'Recording, speak now.';
   };
-  rec.recorder.start();
+  try {
+    rec.recorder.start();
+  } catch (e) {
+    rec.stream?.getTracks().forEach((t) => t.stop());
+    $('#rec-label').textContent = 'Record';
+    return toast(`Can't record: ${e.message}`, true);
+  }
   rec.started = Date.now();
   rec.timer = setInterval(() => {
     const sec = (Date.now() - rec.started) / 1000;
