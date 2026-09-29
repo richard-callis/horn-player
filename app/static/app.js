@@ -243,7 +243,7 @@ $('#tts-go').onclick = () => {
 // ---- recorder -----------------------------------------------------------------------------
 
 const REC_MAX = 60;   // seconds
-const rec = { stream: null, recorder: null, chunks: [], blob: null, ext: 'webm', timer: null, started: 0 };
+const rec = { stream: null, recorder: null, chunks: [], blob: null, ext: 'webm', timer: null, started: 0, starting: false };
 
 function recMime() {
   const opts = [['audio/webm;codecs=opus', 'webm'], ['audio/mp4', 'm4a'], ['audio/ogg;codecs=opus', 'ogg']];
@@ -257,18 +257,27 @@ function recTime(sec) {
 }
 
 async function recStart() {
+  if (rec.starting) return;          // a second tap while the mic permission prompt is open
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
     return toast('Recording needs a browser with microphone access over HTTPS', true);
   }
+  rec.starting = true;
+  $('#rec-btn').disabled = true;
   try {
     rec.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    const { mime, ext } = recMime();
+    rec.ext = ext;
+    rec.chunks = [];
+    rec.recorder = new MediaRecorder(rec.stream, mime ? { mimeType: mime } : undefined);
   } catch (e) {
-    return toast('Microphone access was denied', true);
+    rec.stream?.getTracks().forEach((t) => t.stop());
+    rec.stream = null;
+    rec.recorder = null;
+    return toast(e.name === 'NotAllowedError' ? 'Microphone access was denied' : `Can't record: ${e.message}`, true);
+  } finally {
+    rec.starting = false;
+    $('#rec-btn').disabled = false;
   }
-  const { mime, ext } = recMime();
-  rec.ext = ext;
-  rec.chunks = [];
-  rec.recorder = new MediaRecorder(rec.stream, mime ? { mimeType: mime } : undefined);
   rec.recorder.ondataavailable = (e) => e.data.size && rec.chunks.push(e.data);
   rec.recorder.onstop = recFinished;
   rec.recorder.start();

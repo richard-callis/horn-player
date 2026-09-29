@@ -112,7 +112,7 @@ def test_oversized_upload_on_conversion_path_is_413(client, tmp_path, monkeypatc
 def test_ffconcat_disguised_as_caf_is_rejected(client, tmp_path):
     pid = client.post("/api/playlists", json={"name": "e"}).json()["id"]
     folder = tmp_path / "music" / str(pid)
-    (folder / "real.m4a").write_bytes(b"")
-    evil = b"ffconcat version 1.0\n" + b"file real.m4a\n" * 1000
+    (folder / "real.caf").write_bytes(_caf_bytes(tmp_path))   # real audio: only the whitelist stops it
+    evil = b"ffconcat version 1.0\n" + b"file real.caf\n" * 1000
     r = client.post(f"/api/playlists/{pid}/tracks", files=[("files", ("x.caf", evil))])
     assert r.status_code == 400

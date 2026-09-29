@@ -19,6 +19,10 @@ class SourceError(RuntimeError):
     """ffmpeg could not read or decode the source."""
 
 
+class ConvertTimeout(SourceError):
+    pass
+
+
 # Local files (uploads) are only ever real audio/video containers. Pinning the demuxer list stops a
 # renamed ffconcat/HLS playlist from making ffmpeg read other files over and over.
 LOCAL_INPUT = ["-protocol_whitelist", "file",
@@ -110,7 +114,7 @@ async def to_m4a(src, dst):
     try:
         _, err = await asyncio.wait_for(proc.communicate(), CONVERT_TIMEOUT)
     except asyncio.TimeoutError:
-        raise SourceError(f"conversion took longer than {CONVERT_TIMEOUT} s") from None
+        raise ConvertTimeout(f"conversion took longer than {CONVERT_TIMEOUT} s") from None
     finally:
         if proc.returncode is None:       # timed out or cancelled: don't leave ffmpeg running
             proc.kill()

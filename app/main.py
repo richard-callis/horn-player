@@ -29,6 +29,8 @@ DATA = Path(os.environ.get("DATA_DIR", "/data"))
 AUTH_HEADER = os.environ.get("AUTH_HEADER", "X-authentik-username")
 REQUIRE_AUTH = os.environ.get("REQUIRE_AUTH", "true").lower() == "true"
 MAX_UPLOAD = int(os.environ.get("MAX_UPLOAD_MB", "200")) * 1024 * 1024
+# Play-once recordings are meant to be short (the browser stops at 60 s, well under 5 MB).
+MAX_RECORDING = int(os.environ.get("MAX_RECORDING_MB", "10")) * 1024 * 1024
 # Whole-request cap, checked from Content-Length before Starlette spools a multipart body to disk.
 MAX_REQUEST = int(os.environ.get("MAX_REQUEST_MB", "256")) * 1024 * 1024
 # Station URLs are fetched from inside the cluster; refuse private/cluster addresses unless allowed.
@@ -234,11 +236,14 @@ async def play_once(request: Request, speakers: str = Form(...), file: UploadFil
     """Play an uploaded recording once (push-to-talk style) without adding it to the library."""
     players = hub.targets(speakers)
     dest = DATA / "once" / f"{uuid.uuid4().hex}{_stored_suffix(file.filename)}"
-    await _save_upload(file, dest)
+    await _save_upload(file, dest, limit=MAX_RECORDING)
     done = [p.interrupt(Interrupt("clip", "recording", str(dest))) for p in players]
 
     async def cleanup():
-        await asyncio.gather(*done, return_exceptions=True)
+        results = await asyncio.gather(*done, return_exceptions=True)
+        for p, r in zip(players, results):
+            if isinstance(r, Exception):
+                log.warning("recording on %s failed: %s", p.speaker["name"], r)
         dest.unlink(missing_ok=True)
 
     task = asyncio.create_task(cleanup())
@@ -296,7 +301,7 @@ def _stored_suffix(filename):
     return ext if ext in KEEP_EXT else ".m4a"
 
 
-async def _save_upload(f: UploadFile, dest: Path):
+async def _save_upload(f: UploadFile, dest: Path, limit=None):
     """Write the upload to dest (whose suffix comes from _stored_suffix), converting if needed.
     Work happens in uniquely named temp files; dest only appears, atomically and without
     replacing anything, once the file is complete."""
@@ -309,12 +314,14 @@ async def _save_upload(f: UploadFile, dest: Path):
         with raw.open("wb") as out:
             while chunk := await f.read(1 << 20):
                 size += len(chunk)
-                if size > MAX_UPLOAD:
-                    raise HTTPException(413, f"{f.filename}: larger than {MAX_UPLOAD >> 20} MB")
+                if size > (limit or MAX_UPLOAD):
+                    raise HTTPException(413, f"{f.filename}: larger than {(limit or MAX_UPLOAD) >> 20} MB")
                 out.write(chunk)
         if convert:
             try:
                 await audio.to_m4a(raw, final)
+            except audio.ConvertTimeout as e:
+                raise HTTPException(400, f"{f.filename}: {e}")
             except audio.SourceError:
                 raise HTTPException(400, f"{f.filename}: couldn't read it as audio")
         try:
