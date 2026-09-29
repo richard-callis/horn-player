@@ -6,7 +6,9 @@ yt-dlp is only used to *resolve* a page to a media URL (`-j`); the bytes are alw
 _download, which checks every redirect hop against private addresses and enforces the size and
 time caps. Formats yt-dlp can only fetch in fragments (HLS/DASH) are refused rather than handed to
 yt-dlp's own downloader. This is still best effort against SSRF: DNS can change between the check
-and the connection."""
+and the connection, and while resolving, yt-dlp makes its own unchecked GETs (e.g. an internal URL
+embedded in a page). Those are blind: at most ~200 characters of error text come back. Acceptable
+because only authenticated users can import."""
 import asyncio
 import ipaddress
 import json
@@ -60,8 +62,16 @@ async def _check_public(url, allow_private):
 
 
 async def _download(url, dest: Path, allow_private, headers=None, require_media=True):
-    """Fetch url into dest. Returns False (and writes nothing) if it turns out to be a web page
-    and require_media is set. Redirects are followed by hand so every hop is checked."""
+    """Fetch url into dest. Returns False (and writes nothing) if it turns out to be a web page,
+    or refuses a plain download, and require_media is set, so yt-dlp can have a go instead.
+    Redirects are followed by hand so every hop is checked."""
+    try:
+        return await _download_checked(url, dest, allow_private, headers, require_media)
+    except httpx.HTTPError as e:
+        raise ImportFailed(f"couldn't fetch the link ({type(e).__name__})") from None
+
+
+async def _download_checked(url, dest, allow_private, headers, require_media):
     hdrs = {"User-Agent": UA, **(headers or {})}
     async with httpx.AsyncClient(timeout=30, headers=hdrs) as c:
         for _ in range(5):
@@ -73,6 +83,8 @@ async def _download(url, dest: Path, allow_private, headers=None, require_media=
                 if r.status_code == 403 and "cloudflare" in r.headers.get("server", "").lower():
                     raise ImportFailed(BLOCKED)
                 if not r.is_success:
+                    if require_media:
+                        return False          # maybe yt-dlp can still extract it
                     raise ImportFailed(f"the link returned HTTP {r.status_code}")
                 if any(k.lower().startswith("icy-") for k in r.headers):
                     raise ImportFailed("that's a live radio stream; add it under Library → Stations instead")

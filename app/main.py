@@ -457,7 +457,11 @@ async def import_clip(body: ImportReq, request: Request):
         await fetch_clip(body.url, tmp, DATA / f".import-{tag}", ALLOW_PRIVATE_STREAMS)
         sid = _insert("clip", body.name, "")
         dest = DATA / "clips" / f"{sid}.m4a"
-        tmp.replace(dest)
+        try:
+            tmp.replace(dest)
+        except OSError:
+            db.x("DELETE FROM sources WHERE id = ?", (sid,))
+            raise
     except ImportBusy as e:
         raise HTTPException(429, str(e))
     except ImportFailed as e:

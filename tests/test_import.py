@@ -150,3 +150,25 @@ def test_radio_stream_is_refused_quickly(client, monkeypatch):
     monkeypatch.setattr(importer.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(radio), **kw))
     r = client.post("/api/clips/import", json={"name": "radio", "url": "http://127.0.0.1:1/stream"})
     assert r.status_code == 400 and "Stations" in r.text
+
+
+def test_network_error_is_400_not_500(client):
+    r = client.post("/api/clips/import", json={"name": "down", "url": "http://127.0.0.1:1/nothing.mp3"})
+    assert r.status_code == 400 and "couldn't" in r.text
+
+
+def test_plain_get_refusal_falls_through_to_ytdlp(client, monkeypatch, tmp_path):
+    import httpx
+    calls = []
+
+    def refuse(request):
+        calls.append(str(request.url))
+        return httpx.Response(429)
+    real = httpx.AsyncClient
+    monkeypatch.setattr(importer.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(refuse), **kw))
+
+    async def fake_resolve(url, workdir):
+        raise importer.ImportFailed("resolved-by-ytdlp")
+    monkeypatch.setattr(importer, "_resolve", fake_resolve)
+    r = client.post("/api/clips/import", json={"name": "x", "url": "http://127.0.0.1:1/page"})
+    assert r.status_code == 400 and "resolved-by-ytdlp" in r.text and calls
