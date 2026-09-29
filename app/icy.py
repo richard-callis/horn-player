@@ -3,14 +3,18 @@ import re
 
 import httpx
 
+MAX_METAINT = 64 * 1024
 _TITLE = re.compile(rb"StreamTitle='(.*?)';", re.S)
 
 
 async def now_playing(url, timeout=10):
     async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as c:
         async with c.stream("GET", url, headers={"Icy-MetaData": "1"}) as r:
-            metaint = int(r.headers.get("icy-metaint", 0))
-            if not metaint:
+            try:
+                metaint = int(r.headers.get("icy-metaint", 0))
+            except ValueError:
+                return None
+            if not 0 < metaint <= MAX_METAINT:     # a hostile server could ask us to buffer anything
                 return None
             buf = b""
             async for chunk in r.aiter_raw():

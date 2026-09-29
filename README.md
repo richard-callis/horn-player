@@ -38,14 +38,24 @@ Use a dedicated **local** account on the console that runs Protect. A custom rol
 | `AUTH_HEADER` | `X-authentik-username` | identity header set by the auth proxy |
 | `DOWNMIX` | `quad` | `quad`, `mid` or `left` |
 | `TZ` | UTC | timezone schedules are evaluated in |
+| `MAX_UPLOAD_MB` / `MAX_REQUEST_MB` | `200` / `512` | per-file and per-request upload caps |
+| `ALLOW_PRIVATE_STREAMS` | `false` | allow station URLs that resolve to private/internal addresses |
 
-The app trusts `AUTH_HEADER`, so it must only be reachable through a proxy that sets it
-(e.g. Traefik with Authentik forward-auth).
+## Security notes
+
+- The app trusts `AUTH_HEADER`, so it must only be reachable through a proxy that sets it and
+  overwrites any client-supplied value (Traefik's forward-auth does, when the header is listed in
+  `authResponseHeaders`). Anything that can reach the pod directly can claim any identity; without
+  an enforcing NetworkPolicy that includes other pods in the cluster.
+- Writes from another site are refused by an `Origin` check, since the auth proxy's session
+  cookie would otherwise ride along.
+- Station URLs are fetched server-side. Hosts resolving to private or internal addresses are
+  refused when a station is added (best effort; redirects and later DNS changes aren't re-checked).
 
 ## Development
 
 ```
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt pytest pytest-asyncio
 .venv/bin/python -m pytest -q tests
 ./run-local.sh        # reads credentials from horn.env (UNIFI_HOST=…, UNIFI_USER=…, UNIFI_PASS=…)
 ```

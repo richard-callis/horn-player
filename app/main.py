@@ -1,9 +1,12 @@
 """horn-player: play stations, playlists, sound effects and announcements on UniFi Protect speakers."""
 import asyncio
+import ipaddress
 import logging
 import os
 import re
 import shutil
+import socket
+from urllib.parse import urlsplit
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -24,6 +27,10 @@ DATA = Path(os.environ.get("DATA_DIR", "/data"))
 AUTH_HEADER = os.environ.get("AUTH_HEADER", "X-authentik-username")
 REQUIRE_AUTH = os.environ.get("REQUIRE_AUTH", "true").lower() == "true"
 MAX_UPLOAD = int(os.environ.get("MAX_UPLOAD_MB", "200")) * 1024 * 1024
+# Whole-request cap, checked from Content-Length before Starlette spools a multipart body to disk.
+MAX_REQUEST = int(os.environ.get("MAX_REQUEST_MB", "512")) * 1024 * 1024
+# Station URLs are fetched from inside the cluster; refuse private/cluster addresses unless allowed.
+ALLOW_PRIVATE_STREAMS = os.environ.get("ALLOW_PRIVATE_STREAMS", "false").lower() == "true"
 DEFAULT_STATIONS = [
     ("Dead Air (Halloween)", "https://streaming.live365.com/a43471"),
     ("24/7 Christmas Music", "https://streaming.live365.com/a29903"),
@@ -37,6 +44,7 @@ class Hub:
         self.downmix = downmix
         self.players: dict[str, SpeakerPlayer] = {}
         self.speaker_error: str | None = None
+        self.ready = asyncio.Event()      # set after the first successful speaker discovery
 
     async def refresh_speakers(self):
         try:
@@ -45,7 +53,7 @@ class Hub:
         except Exception as e:
             self.speaker_error = str(e)
             log.warning("speaker discovery: %s", e)
-            return
+            return False
         for s in speakers:
             if s["id"] in self.players:
                 self.players[s["id"]].speaker.update(s)
@@ -53,11 +61,13 @@ class Hub:
                 p = SpeakerPlayer(self.protect, s, self.downmix)
                 p.start()
                 self.players[s["id"]] = p
+        self.ready.set()
+        return True
 
     async def discover_forever(self):
         while True:
-            await self.refresh_speakers()
-            await asyncio.sleep(300)
+            ok = await self.refresh_speakers()
+            await asyncio.sleep(300 if ok else 30)
 
     def targets(self, speaker_ids):
         if speaker_ids in ("*", ["*"]):
@@ -68,16 +78,29 @@ class Hub:
             raise HTTPException(404, f"unknown speaker {missing[0]}")
         return [self.players[i] for i in ids]
 
+    def speakers_for(self, speaker_id):
+        """Players a schedule targets; unknown ids simply match nothing (yet)."""
+        if speaker_id == "*":
+            return list(self.players.values())
+        return [self.players[speaker_id]] if speaker_id in self.players else []
+
     def source(self, source_id, kind=None):
         s = self.db.one("SELECT * FROM sources WHERE id = ?", (source_id,))
         if not s or (kind and s["kind"] not in kind):
             raise HTTPException(404, "no such source")
         return s
 
+    def start(self, player, source_id, origin):
+        s = self.db.one("SELECT * FROM sources WHERE id = ? AND kind IN ('station', 'playlist')", (source_id,))
+        if not s:
+            raise LookupError(f"source {source_id} no longer exists")
+        player.play_music(Music(s["id"], s["name"], s["kind"], s["target"], origin=origin))
+        return s
+
     def play_source(self, speaker_ids, source_id, origin="manual"):
         s = self.source(source_id, ("station", "playlist"))
         for p in self.targets(speaker_ids):
-            p.play_music(Music(s["id"], s["name"], s["kind"], s["target"], origin=origin))
+            self.start(p, source_id, origin)
         return s
 
     def stop_origin(self, origin):
@@ -114,10 +137,21 @@ app = FastAPI(title="horn-player", lifespan=lifespan)
 
 
 @app.middleware("http")
-async def auth(request: Request, call_next):
+async def guard(request: Request, call_next):
     user = request.headers.get(AUTH_HEADER)
     if REQUIRE_AUTH and not user and request.url.path != "/api/health":
         return JSONResponse({"detail": "not authenticated"}, status_code=401)
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        # Refuse cross-site writes; body-less POSTs and form uploads are "simple" requests that
+        # would otherwise ride on the Authentik session cookie.
+        origin = request.headers.get("origin")
+        if origin and urlsplit(origin).netloc != request.headers.get("host"):
+            return JSONResponse({"detail": "cross-site request refused"}, status_code=403)
+        length = request.headers.get("content-length")
+        if length is None and request.headers.get("transfer-encoding"):
+            return JSONResponse({"detail": "Content-Length required"}, status_code=411)
+        if length and (not length.isdigit() or int(length) > MAX_REQUEST):
+            return JSONResponse({"detail": f"request larger than {MAX_REQUEST >> 20} MB"}, status_code=413)
     request.state.user = user or "anonymous"
     return await call_next(request)
 
@@ -210,7 +244,7 @@ async def announce(body: SpeakReq, request: Request):
             raise HTTPException(500, str(e))
     else:
         item = ("speak", body.text)
-    results = await asyncio.gather(*(p.interrupt(Interrupt(item[0], "announcement", item[1]))
+    results = await asyncio.gather(*(p.interrupt(Interrupt(item[0], f"“{body.text[:40]}”", item[1]))
                                      for p in players), return_exceptions=True)
     errors = [str(r) for r in results if isinstance(r, Exception)]
     audit(request, f"announced '{body.text[:60]}'" + (f" (failed: {errors[0]})" if errors else ""))
@@ -254,6 +288,17 @@ class StationReq(BaseModel):
         return v
 
 
+def _public_host(url):
+    """Whether every address the URL's host resolves to is public (best effort: a redirect or a
+    later DNS change can still point elsewhere)."""
+    host = urlsplit(url).hostname
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (socket.gaierror, UnicodeError):
+        raise HTTPException(400, f"can't resolve {host}")
+    return all(ipaddress.ip_address(i[4][0]).is_global for i in infos)
+
+
 class NameReq(BaseModel):
     name: str = Field(min_length=1, max_length=80)
 
@@ -276,6 +321,8 @@ async def sources():
 
 @app.post("/api/stations")
 async def add_station(body: StationReq, request: Request):
+    if not ALLOW_PRIVATE_STREAMS and not await asyncio.to_thread(_public_host, body.url):
+        raise HTTPException(400, "stream URLs on private or internal addresses aren't allowed")
     sid = _insert("station", body.name, body.url)
     audit(request, f"added station {body.name}")
     return {"id": sid}
@@ -295,7 +342,10 @@ async def add_playlist(body: NameReq, request: Request):
 async def upload_tracks(source_id: int, request: Request, files: list[UploadFile] = File(...)):
     s = hub.source(source_id, ("playlist",))
     for f in files:
-        await _save_upload(f, Path(s["target"]) / _safe_name(f.filename))
+        dest = Path(s["target"]) / _safe_name(f.filename)
+        if dest.exists():
+            raise HTTPException(409, f"{dest.name} is already in {s['name']}; delete it first")
+        await _save_upload(f, dest)
     audit(request, f"uploaded {len(files)} track(s) to {s['name']}")
     return {"ok": True}
 

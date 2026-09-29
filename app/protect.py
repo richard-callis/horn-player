@@ -91,11 +91,19 @@ class Protect:
     async def open_talkback(self, speaker_id):
         if not self.token:
             await self.login()
-        ws = await websockets.connect(
-            f"wss://{self.host}/proxy/protect/ws/talkback?speaker={speaker_id}",
-            additional_headers={"Cookie": f"TOKEN={self.token}"},
-            origin=f"https://{self.host}", ssl=_insecure_ctx(), open_timeout=15,
-            ping_interval=None, max_queue=4)
+        for attempt in range(2):
+            try:
+                ws = await websockets.connect(
+                    f"wss://{self.host}/proxy/protect/ws/talkback?speaker={speaker_id}",
+                    additional_headers={"Cookie": f"TOKEN={self.token}"},
+                    origin=f"https://{self.host}", ssl=_insecure_ctx(), open_timeout=15,
+                    ping_interval=None, max_queue=4)
+                break
+            except websockets.InvalidStatus as e:
+                # An expired session is refused at the handshake; log in again once.
+                if attempt or e.response.status_code not in (401, 403):
+                    raise
+                await self.login()
         # Protect accepts the handshake and then closes straight away if talkback isn't allowed.
         try:
             await asyncio.wait_for(ws.recv(), 0.4)

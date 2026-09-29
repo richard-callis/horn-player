@@ -1,5 +1,6 @@
 """ffmpeg transcoding to the horn's talkback format: AAC-LC in ADTS, 24 kHz mono."""
 import asyncio
+import collections
 import json
 
 FRAME_DT = 1024 / 24000.0  # seconds of audio per AAC-LC frame at 24 kHz
@@ -14,6 +15,10 @@ DOWNMIX = {
 }
 
 
+class SourceError(RuntimeError):
+    """ffmpeg could not read or decode the source."""
+
+
 def is_url(src):
     return src.startswith(("http://", "https://"))
 
@@ -26,7 +31,8 @@ def ffmpeg_cmd(src, downmix="quad", seek=0.0, lead_silence_ms=900):
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin"]
     if is_url(src):
         # Keep URL sources to plain HTTP(S) so a playlist response can't redirect ffmpeg to file:// etc.
-        cmd += ["-protocol_whitelist", "http,https,tcp,tls,crypto",
+        # -rw_timeout (microseconds) makes a stalled connection fail instead of hanging forever.
+        cmd += ["-protocol_whitelist", "http,https,tcp,tls,crypto", "-rw_timeout", "15000000",
                 "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "10"]
     elif seek > 0:
         cmd += ["-ss", f"{seek:.2f}"]
@@ -53,11 +59,19 @@ def split_adts(buf):
     return frames, buf[i:]
 
 
+async def _drain(stream, tail):
+    """Keep reading ffmpeg's stderr so a chatty stream can't fill the pipe and stall it."""
+    while line := await stream.readline():
+        tail.append(line.decode(errors="replace").rstrip())
+
+
 async def adts_frames(src, downmix="quad", seek=0.0, lead_silence_ms=900):
     """Yield ADTS frames from ffmpeg as they are produced; the ffmpeg process dies with the generator."""
     proc = await asyncio.create_subprocess_exec(
         *ffmpeg_cmd(src, downmix, seek, lead_silence_ms),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    tail = collections.deque(maxlen=5)
+    drain = asyncio.create_task(_drain(proc.stderr, tail))
     buf = b""
     try:
         while True:
@@ -68,13 +82,14 @@ async def adts_frames(src, downmix="quad", seek=0.0, lead_silence_ms=900):
             for f in frames:
                 yield f
         await proc.wait()
+        await drain
         if proc.returncode:
-            err = (await proc.stderr.read()).decode(errors="replace").strip()
-            raise RuntimeError(f"ffmpeg failed on {src}: {err[:300]}")
+            raise SourceError(f"can't play {src}: {' '.join(tail)[:300]}")
     finally:
         if proc.returncode is None:
             proc.kill()
             await proc.wait()
+        drain.cancel()
 
 
 async def probe_title(path):

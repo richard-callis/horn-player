@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates \
@@ -8,10 +8,15 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-ARG VOICE_BASE=https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium
-RUN mkdir -p /app/voices \
- && curl -fsSL -o /app/voices/en_US-lessac-medium.onnx "$VOICE_BASE/en_US-lessac-medium.onnx" \
- && curl -fsSL -o /app/voices/en_US-lessac-medium.onnx.json "$VOICE_BASE/en_US-lessac-medium.onnx.json"
+# Piper voice, pinned to a piper-voices revision and checked against known hashes.
+ARG VOICE_BASE=https://huggingface.co/rhasspy/piper-voices/resolve/c10ece1aade47bb51c153c893d14e5bf8e5b7117/en/en_US/lessac/medium
+RUN mkdir -p /app/voices && cd /app/voices \
+ && curl -fsSL -o en_US-lessac-medium.onnx "$VOICE_BASE/en_US-lessac-medium.onnx" \
+ && curl -fsSL -o en_US-lessac-medium.onnx.json "$VOICE_BASE/en_US-lessac-medium.onnx.json" \
+ && printf '%s  %s\n' \
+      5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f en_US-lessac-medium.onnx \
+      efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0 en_US-lessac-medium.onnx.json \
+    | sha256sum -c -
 
 COPY app ./app
 
