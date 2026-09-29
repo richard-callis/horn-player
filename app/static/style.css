@@ -108,6 +108,13 @@ section + section { margin-top: 32px; }
 .pad:hover { background: var(--color-raised); border-color: var(--color-border-strong); }
 .pad:active { background: var(--color-accent-soft); border-color: var(--color-accent); }
 
+/* recorder */
+.rec-dot { width: 10px; height: 10px; border-radius: 50%; background: currentColor; }
+.rec.recording #rec-btn { background: var(--color-warning); }
+.rec.recording .rec-dot { animation: pulse 1s var(--ease) infinite; }
+.rec.recording #rec-time { color: var(--color-warning); }
+@keyframes pulse { 50% { opacity: .25; } }
+
 /* forms */
 .field { display: flex; flex-direction: column; gap: 4px; }
 .field > span { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--color-text-muted); }

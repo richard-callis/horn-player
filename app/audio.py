@@ -19,6 +19,13 @@ class SourceError(RuntimeError):
     """ffmpeg could not read or decode the source."""
 
 
+# Local files (uploads) are only ever real audio/video containers. Pinning the demuxer list stops a
+# renamed ffconcat/HLS playlist from making ffmpeg read other files over and over.
+LOCAL_INPUT = ["-protocol_whitelist", "file",
+               "-format_whitelist", "mp3,aac,ogg,flac,wav,w64,caf,aiff,amr,mov,mp4,m4a,3gp,matroska,webm,asf"]
+CONVERT_TIMEOUT = 120   # seconds
+
+
 def is_url(src):
     return src.startswith(("http://", "https://"))
 
@@ -34,8 +41,10 @@ def ffmpeg_cmd(src, downmix="quad", seek=0.0, lead_silence_ms=900):
         # -rw_timeout (microseconds) makes a stalled connection fail instead of hanging forever.
         cmd += ["-protocol_whitelist", "http,https,tcp,tls,crypto", "-rw_timeout", "15000000",
                 "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "10"]
-    elif seek > 0:
-        cmd += ["-ss", f"{seek:.2f}"]
+    else:
+        cmd += LOCAL_INPUT
+        if seek > 0:
+            cmd += ["-ss", f"{seek:.2f}"]
     cmd += ["-i", src, "-filter_complex", fc, "-map", "[out]", "-c:a", "aac", "-profile:a", "aac_low",
             "-ar", "24000", "-ac", "1", "-b:a", "32k", "-f", "adts", "pipe:1"]
     return cmd
@@ -95,10 +104,17 @@ async def adts_frames(src, downmix="quad", seek=0.0, lead_silence_ms=900):
 async def to_m4a(src, dst):
     """Transcode any audio ffmpeg can read (e.g. .caf voice recordings) to AAC in .m4a."""
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(src),
-        "-map", "0:a:0", "-vn", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(dst),
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", *LOCAL_INPUT, "-i", str(src),
+        "-map", "0:a:0", "-vn", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-f", "ipod", str(dst),
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-    _, err = await proc.communicate()
+    try:
+        _, err = await asyncio.wait_for(proc.communicate(), CONVERT_TIMEOUT)
+    except asyncio.TimeoutError:
+        raise SourceError(f"conversion took longer than {CONVERT_TIMEOUT} s") from None
+    finally:
+        if proc.returncode is None:       # timed out or cancelled: don't leave ffmpeg running
+            proc.kill()
+            await proc.wait()
     if proc.returncode:
         raise SourceError(err.decode(errors="replace").strip()[-200:] or "not an audio file")
 

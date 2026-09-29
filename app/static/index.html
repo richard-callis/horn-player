@@ -49,7 +49,26 @@
       <div><h1>Soundboard</h1><p>Fire a clip; whatever was playing picks up again afterwards.</p></div>
       <label class="field" style="min-width:200px"><span>Play on</span><select id="sb-target"></select></label>
     </div>
-    <div class="pads" id="pads"></div>
+    <div class="card stack rec" id="rec">
+      <div class="card-head" style="margin-bottom:0">
+        <div class="eyebrow">Record</div>
+        <span class="mono muted" id="rec-time">0:00 / 1:00</span>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="rec-btn"><span class="rec-dot"></span><span id="rec-label">Record</span></button>
+        <span class="muted" id="rec-hint">Records from this device's microphone.</span>
+      </div>
+      <div class="stack" id="rec-take" hidden>
+        <audio id="rec-audio" controls style="width:100%"></audio>
+        <div class="row">
+          <button class="btn primary" id="rec-play">Play now</button>
+          <label class="field"><span>Clip name</span><input id="rec-name" maxlength="80" placeholder="Front door warning"></label>
+          <button class="btn secondary" id="rec-save">Save as clip</button>
+          <button class="btn danger" id="rec-discard">Discard</button>
+        </div>
+      </div>
+    </div>
+    <div class="pads" id="pads" style="margin-top:16px"></div>
   </div>
 
   <div data-page="announce" hidden>

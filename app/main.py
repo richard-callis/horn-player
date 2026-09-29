@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import socket
+import uuid
 from urllib.parse import urlsplit
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -119,6 +120,8 @@ async def lifespan(app):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     for d in ("music", "clips"):
         (DATA / d).mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(DATA / "once", ignore_errors=True)   # leftovers from play-once recordings
+    (DATA / "once").mkdir()
     db = DB(DATA / "horn-player.db")
     if not db.one("SELECT id FROM sources LIMIT 1"):
         for name, url in DEFAULT_STATIONS:
@@ -223,6 +226,28 @@ async def skip(speaker_id: str, request: Request):
     return {"ok": True}
 
 
+_background: set[asyncio.Task] = set()
+
+
+@app.post("/api/play-once")
+async def play_once(request: Request, speakers: str = Form(...), file: UploadFile = File(...)):
+    """Play an uploaded recording once (push-to-talk style) without adding it to the library."""
+    players = hub.targets(speakers)
+    dest = DATA / "once" / f"{uuid.uuid4().hex}{_stored_suffix(file.filename)}"
+    await _save_upload(file, dest)
+    done = [p.interrupt(Interrupt("clip", "recording", str(dest))) for p in players]
+
+    async def cleanup():
+        await asyncio.gather(*done, return_exceptions=True)
+        dest.unlink(missing_ok=True)
+
+    task = asyncio.create_task(cleanup())
+    _background.add(task)                 # keep a reference so the task isn't garbage-collected
+    task.add_done_callback(_background.discard)
+    audit(request, f"played a recording on {', '.join(p.speaker['name'] for p in players)}")
+    return {"ok": True}
+
+
 @app.post("/api/soundboard")
 async def soundboard(body: ClipReq, request: Request):
     c = hub.source(body.clip_id, ("clip",))
@@ -272,9 +297,13 @@ def _stored_suffix(filename):
 
 
 async def _save_upload(f: UploadFile, dest: Path):
-    """Write the upload to dest (whose suffix comes from _stored_suffix), converting if needed."""
+    """Write the upload to dest (whose suffix comes from _stored_suffix), converting if needed.
+    Work happens in uniquely named temp files; dest only appears, atomically and without
+    replacing anything, once the file is complete."""
     convert = Path(f.filename or "").suffix.lower() not in KEEP_EXT
-    raw = dest.with_name(f".{dest.name}.upload") if convert else dest
+    tag = uuid.uuid4().hex
+    raw = dest.with_name(f".{tag}.upload")
+    final = dest.with_name(f".{tag}.m4a") if convert else raw
     size = 0
     try:
         with raw.open("wb") as out:
@@ -285,15 +314,16 @@ async def _save_upload(f: UploadFile, dest: Path):
                 out.write(chunk)
         if convert:
             try:
-                await audio.to_m4a(raw, dest)
+                await audio.to_m4a(raw, final)
             except audio.SourceError:
                 raise HTTPException(400, f"{f.filename}: couldn't read it as audio")
-    except BaseException:
-        dest.unlink(missing_ok=True)
-        raise
+        try:
+            os.link(final, dest)          # fails instead of overwriting if dest appeared meanwhile
+        except FileExistsError:
+            raise HTTPException(409, f"{dest.name} already exists; nothing was uploaded")
     finally:
-        if convert:
-            raw.unlink(missing_ok=True)
+        raw.unlink(missing_ok=True)
+        final.unlink(missing_ok=True)
 
 
 class StationReq(BaseModel):
@@ -388,7 +418,7 @@ async def add_clip(request: Request, name: str = Form(..., min_length=1, max_len
     dest = DATA / "clips" / f"{sid}{_stored_suffix(file.filename)}"
     try:
         await _save_upload(file, dest)
-    except HTTPException:
+    except BaseException:
         db.x("DELETE FROM sources WHERE id = ?", (sid,))
         raise
     db.x("UPDATE sources SET target = ? WHERE id = ?", (str(dest), sid))

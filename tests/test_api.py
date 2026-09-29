@@ -62,3 +62,57 @@ def test_caf_track_lands_as_m4a_and_garbage_is_rejected(client, tmp_path):
     r = client.post(f"/api/playlists/{pid}/tracks", files=[("files", ("junk.caf", b"not audio at all"))])
     assert r.status_code == 400 and "couldn't read it as audio" in r.text
     assert sorted(p.name for p in (tmp_path / "music" / str(pid)).iterdir()) == ["memo.m4a"]
+
+
+def test_play_once_plays_and_cleans_up(client, tmp_path, monkeypatch):
+    import asyncio
+    (tmp_path / "once").mkdir()
+    played = []
+
+    class P:
+        speaker = {"name": "Horn"}
+
+        def interrupt(self, item):
+            played.append((item.kind, item.target))
+            f = asyncio.get_running_loop().create_future()
+            f.set_result(True)
+            return f
+
+    main.hub.players["s1"] = P()
+    r = client.post("/api/play-once", data={"speakers": "s1"}, files={"file": ("recording.caf", _caf_bytes(tmp_path))})
+    assert r.status_code == 200, r.text
+    assert played and played[0][0] == "clip" and played[0][1].endswith(".m4a")
+    assert list((tmp_path / "once").iterdir()) == []      # removed once played
+
+
+def test_converted_name_clash_is_409(client, tmp_path):
+    pid = client.post("/api/playlists", json={"name": "c"}).json()["id"]
+    caf = _caf_bytes(tmp_path)
+    assert client.post(f"/api/playlists/{pid}/tracks", files=[("files", ("memo.caf", caf))]).status_code == 200
+    r = client.post(f"/api/playlists/{pid}/tracks", files=[("files", ("memo.aiff", caf))])
+    assert r.status_code == 409            # both would be stored as memo.m4a
+
+
+def test_failed_clip_conversion_leaves_no_row_or_files(client, tmp_path):
+    (tmp_path / "clips").mkdir()
+    r = client.post("/api/clips", data={"name": "bad"}, files={"file": ("bad.caf", b"nope")})
+    assert r.status_code == 400
+    assert [s for s in client.get("/api/sources").json() if s["kind"] == "clip"] == []
+    assert list((tmp_path / "clips").iterdir()) == []
+
+
+def test_oversized_upload_on_conversion_path_is_413(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "MAX_UPLOAD", 10)
+    pid = client.post("/api/playlists", json={"name": "big"}).json()["id"]
+    r = client.post(f"/api/playlists/{pid}/tracks", files=[("files", ("big.caf", b"x" * 100))])
+    assert r.status_code == 413
+    assert list((tmp_path / "music" / str(pid)).iterdir()) == []
+
+
+def test_ffconcat_disguised_as_caf_is_rejected(client, tmp_path):
+    pid = client.post("/api/playlists", json={"name": "e"}).json()["id"]
+    folder = tmp_path / "music" / str(pid)
+    (folder / "real.m4a").write_bytes(b"")
+    evil = b"ffconcat version 1.0\n" + b"file real.m4a\n" * 1000
+    r = client.post(f"/api/playlists/{pid}/tracks", files=[("files", ("x.caf", evil))])
+    assert r.status_code == 400

@@ -240,6 +240,98 @@ $('#tts-go').onclick = () => {
     .finally(() => (btn.disabled = false));
 };
 
+// ---- recorder -----------------------------------------------------------------------------
+
+const REC_MAX = 60;   // seconds
+const rec = { stream: null, recorder: null, chunks: [], blob: null, ext: 'webm', timer: null, started: 0 };
+
+function recMime() {
+  const opts = [['audio/webm;codecs=opus', 'webm'], ['audio/mp4', 'm4a'], ['audio/ogg;codecs=opus', 'ogg']];
+  for (const [mime, ext] of opts) if (window.MediaRecorder && MediaRecorder.isTypeSupported(mime)) return { mime, ext };
+  return { mime: '', ext: 'webm' };
+}
+
+function recTime(sec) {
+  const f = (n) => `${Math.floor(n / 60)}:${String(Math.floor(n % 60)).padStart(2, '0')}`;
+  $('#rec-time').textContent = `${f(sec)} / ${f(REC_MAX)}`;
+}
+
+async function recStart() {
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    return toast('Recording needs a browser with microphone access over HTTPS', true);
+  }
+  try {
+    rec.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+  } catch (e) {
+    return toast('Microphone access was denied', true);
+  }
+  const { mime, ext } = recMime();
+  rec.ext = ext;
+  rec.chunks = [];
+  rec.recorder = new MediaRecorder(rec.stream, mime ? { mimeType: mime } : undefined);
+  rec.recorder.ondataavailable = (e) => e.data.size && rec.chunks.push(e.data);
+  rec.recorder.onstop = recFinished;
+  rec.recorder.start();
+  rec.started = Date.now();
+  $('#rec').classList.add('recording');
+  $('#rec-label').textContent = 'Stop';
+  $('#rec-take').hidden = true;
+  rec.timer = setInterval(() => {
+    const sec = (Date.now() - rec.started) / 1000;
+    recTime(sec);
+    if (sec >= REC_MAX) recStop();
+  }, 200);
+}
+
+function recStop() {
+  clearInterval(rec.timer);
+  if (rec.recorder && rec.recorder.state !== 'inactive') rec.recorder.stop();
+  rec.stream?.getTracks().forEach((t) => t.stop());
+  $('#rec').classList.remove('recording');
+  $('#rec-label').textContent = 'Record';
+}
+
+function recFinished() {
+  rec.blob = new Blob(rec.chunks, { type: rec.recorder.mimeType || 'audio/webm' });
+  const a = $('#rec-audio');
+  if (a.src) URL.revokeObjectURL(a.src);
+  a.src = URL.createObjectURL(rec.blob);
+  $('#rec-take').hidden = false;
+  $('#rec-hint').textContent = 'Listen back, then play it or keep it.';
+}
+
+function recDiscard() {
+  rec.blob = null;
+  const a = $('#rec-audio');
+  if (a.src) URL.revokeObjectURL(a.src);
+  a.removeAttribute('src');
+  $('#rec-take').hidden = true;
+  $('#rec-name').value = '';
+  $('#rec-hint').textContent = "Records from this device's microphone.";
+  recTime(0);
+}
+
+$('#rec-btn').onclick = () => (rec.recorder && rec.recorder.state === 'recording' ? recStop() : recStart());
+$('#rec-discard').onclick = recDiscard;
+
+$('#rec-play').onclick = () => {
+  if (!rec.blob) return;
+  const fd = new FormData();
+  fd.append('speakers', $('#sb-target').value);
+  fd.append('file', rec.blob, `recording.${rec.ext}`);
+  run(() => api('/play-once', { body: fd }), 'Playing your recording');
+};
+
+$('#rec-save').onclick = () => {
+  const name = $('#rec-name').value.trim();
+  if (!rec.blob) return;
+  if (!name) return toast('Give the clip a name first', true);
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('file', rec.blob, `${name}.${rec.ext}`);
+  run(async () => { await api('/clips', { body: fd }); recDiscard(); await loadSources(); }, `Saved "${name}"`);
+};
+
 // ---- schedules ----------------------------------------------------------------------------
 
 let schedules = [];
