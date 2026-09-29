@@ -111,11 +111,12 @@ async def adts_frames(src, downmix="quad", seek=0.0, lead_silence_ms=900):
         drain.cancel()
 
 
-async def to_m4a(src, dst):
+async def to_m4a(src, dst, max_seconds=None):
     """Transcode any audio ffmpeg can read (e.g. .caf voice recordings) to AAC in .m4a."""
+    limit = ["-t", str(max_seconds)] if max_seconds else []
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", *LOCAL_INPUT, "-i", str(src),
-        "-map", "0:a:0", "-vn", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-f", "ipod", str(dst),
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "1", "-y",
+        *LOCAL_INPUT, "-i", str(src), *limit, "-map", "0:a:0", "-vn", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-f", "ipod", str(dst),
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
     try:
         _, err = await asyncio.wait_for(proc.communicate(), CONVERT_TIMEOUT)

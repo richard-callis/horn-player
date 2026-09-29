@@ -1,11 +1,9 @@
 """horn-player: play stations, playlists, sound effects and announcements on UniFi Protect speakers."""
 import asyncio
-import ipaddress
 import logging
 import os
 import re
 import shutil
-import socket
 import uuid
 from urllib.parse import urlsplit
 from contextlib import asynccontextmanager
@@ -18,6 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from . import audio
 from .db import DB
+from .importer import ImportFailed, fetch_clip, public_host
 from .player import AUDIO_EXT, Interrupt, Music, SpeakerPlayer
 from .protect import Protect
 from .scheduler import Scheduler
@@ -348,12 +347,10 @@ class StationReq(BaseModel):
 def _public_host(url):
     """Whether every address the URL's host resolves to is public (best effort: a redirect or a
     later DNS change can still point elsewhere)."""
-    host = urlsplit(url).hostname
     try:
-        infos = socket.getaddrinfo(host, None)
-    except (socket.gaierror, UnicodeError):
-        raise HTTPException(400, f"can't resolve {host}")
-    return all(ipaddress.ip_address(i[4][0]).is_global for i in infos)
+        return public_host(url)
+    except ImportFailed as e:
+        raise HTTPException(400, str(e))
 
 
 class NameReq(BaseModel):
@@ -430,6 +427,36 @@ async def add_clip(request: Request, name: str = Form(..., min_length=1, max_len
         raise
     db.x("UPDATE sources SET target = ? WHERE id = ?", (str(dest), sid))
     audit(request, f"added clip {name}")
+    return {"id": sid}
+
+
+class ImportReq(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    url: str
+
+    @field_validator("url")
+    @classmethod
+    def http_only(cls, v):
+        if not re.match(r"^https?://[^\s]+$", v):
+            raise ValueError("must be an http(s) link")
+        return v
+
+
+@app.post("/api/clips/import")
+async def import_clip(body: ImportReq, request: Request):
+    """Add a clip from a link: a direct audio file, YouTube, or a page embedding audio."""
+    sid = _insert("clip", body.name, "")
+    dest = DATA / "clips" / f"{sid}.m4a"
+    try:
+        await fetch_clip(body.url, dest, DATA / f".import-{uuid.uuid4().hex}", ALLOW_PRIVATE_STREAMS)
+    except BaseException as e:
+        db.x("DELETE FROM sources WHERE id = ?", (sid,))
+        dest.unlink(missing_ok=True)
+        if isinstance(e, ImportFailed):
+            raise HTTPException(400, str(e))
+        raise
+    db.x("UPDATE sources SET target = ? WHERE id = ?", (str(dest), sid))
+    audit(request, f"imported clip {body.name} from {body.url}")
     return {"id": sid}
 
 

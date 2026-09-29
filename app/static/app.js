@@ -211,6 +211,16 @@ $('#playlist-form').onsubmit = (e) => {
   const f = e.target;
   run(async () => { await api('/playlists', { body: { name: f.name.value } }); f.reset(); await loadSources(); }, 'Playlist created');
 };
+$('#import-form').onsubmit = (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const btn = f.querySelector('button');
+  btn.disabled = true;
+  toast('Importing… this can take a little while');
+  run(async () => { await api('/clips/import', { body: { name: f.name.value, url: f.url.value } }); f.reset(); await loadSources(); }, 'Clip imported')
+    .finally(() => (btn.disabled = false));
+};
+
 $('#clip-form').onsubmit = (e) => {
   e.preventDefault();
   const f = e.target;
