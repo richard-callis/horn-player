@@ -203,11 +203,17 @@ class SpeakerPlayer:
         except (PermissionError, RuntimeError) as e:
             # One failed clip/announcement shouldn't kill the music underneath it.
             self.error = str(e)
+        except BaseException as e:
+            # Anything else (4403, network, cancellation) is handled by _run, but the caller
+            # waiting on this item must still get an answer.
             if item.done and not item.done.done():
-                item.done.set_exception(e)
+                item.done.set_exception(e if isinstance(e, Exception) else RuntimeError("cancelled"))
+            raise
         finally:
             if self.queue and self.queue[0] is item:
                 self.queue.pop(0)
+            if item.done and not item.done.done():
+                item.done.set_exception(RuntimeError(self.error or "announcement failed"))
 
     async def _play_interrupt(self, item: Interrupt):
         self._preempt = False
@@ -218,7 +224,10 @@ class SpeakerPlayer:
         else:
             await self._close_ws()  # let the speaker's own TTS have the audio path
             await self.protect.speak(self.speaker["mac"], item.target)
-            await self._sleep(2 + len(item.target.split()) / 2.5)  # rough speaking time
+            # Rough speaking time. Only a stop cuts it short: a queued clip must not talk over it.
+            end = time.monotonic() + 2 + len(item.target.split()) / 2.5
+            while time.monotonic() < end and not self._abort:
+                await asyncio.sleep(POLL)
         if item.done and not item.done.done():
             item.done.set_result(True)
 

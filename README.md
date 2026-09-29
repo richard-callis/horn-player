@@ -38,7 +38,7 @@ Use a dedicated **local** account on the console that runs Protect. A custom rol
 | `AUTH_HEADER` | `X-authentik-username` | identity header set by the auth proxy |
 | `DOWNMIX` | `quad` | `quad`, `mid` or `left` |
 | `TZ` | UTC | timezone schedules are evaluated in |
-| `MAX_UPLOAD_MB` / `MAX_REQUEST_MB` | `200` / `512` | per-file and per-request upload caps |
+| `MAX_UPLOAD_MB` / `MAX_REQUEST_MB` | `200` / `256` | per-file and per-request upload caps |
 | `ALLOW_PRIVATE_STREAMS` | `false` | allow station URLs that resolve to private/internal addresses |
 
 ## Security notes

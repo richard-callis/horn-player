@@ -233,3 +233,20 @@ async def test_window_close_stops_only_its_own_music():
     q.music = Music(3, "manual", "station", "u")
     await sc.tick(datetime(2026, 10, 31, 21, 30), wall=2000)
     assert p.music is None and q.music is not None
+
+
+async def test_refused_announcement_answers_instead_of_hanging(monkeypatch):
+    from app.protect import TalkbackRefused
+
+    class Refusing(FakeProtect):
+        async def open_talkback(self, speaker_id):
+            raise TalkbackRefused(4403)
+
+    gen, _ = fake_source({"say.wav": 3})
+    monkeypatch.setattr(audio, "adts_frames", gen)
+    p = SpeakerPlayer(Refusing(), {"id": "s1", "mac": "m", "name": "Horn"})
+    p.start()
+    done = p.interrupt(Interrupt("tts", "hi", "say.wav"))
+    with pytest.raises(TalkbackRefused):
+        await asyncio.wait_for(done, 2)
+    await p.shutdown()

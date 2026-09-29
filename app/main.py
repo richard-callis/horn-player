@@ -28,7 +28,7 @@ AUTH_HEADER = os.environ.get("AUTH_HEADER", "X-authentik-username")
 REQUIRE_AUTH = os.environ.get("REQUIRE_AUTH", "true").lower() == "true"
 MAX_UPLOAD = int(os.environ.get("MAX_UPLOAD_MB", "200")) * 1024 * 1024
 # Whole-request cap, checked from Content-Length before Starlette spools a multipart body to disk.
-MAX_REQUEST = int(os.environ.get("MAX_REQUEST_MB", "512")) * 1024 * 1024
+MAX_REQUEST = int(os.environ.get("MAX_REQUEST_MB", "256")) * 1024 * 1024
 # Station URLs are fetched from inside the cluster; refuse private/cluster addresses unless allowed.
 ALLOW_PRIVATE_STREAMS = os.environ.get("ALLOW_PRIVATE_STREAMS", "false").lower() == "true"
 DEFAULT_STATIONS = [
@@ -148,8 +148,6 @@ async def guard(request: Request, call_next):
         if origin and urlsplit(origin).netloc != request.headers.get("host"):
             return JSONResponse({"detail": "cross-site request refused"}, status_code=403)
         length = request.headers.get("content-length")
-        if length is None and request.headers.get("transfer-encoding"):
-            return JSONResponse({"detail": "Content-Length required"}, status_code=411)
         if length and (not length.isdigit() or int(length) > MAX_REQUEST):
             return JSONResponse({"detail": f"request larger than {MAX_REQUEST >> 20} MB"}, status_code=413)
     request.state.user = user or "anonymous"
@@ -341,10 +339,12 @@ async def add_playlist(body: NameReq, request: Request):
 @app.post("/api/playlists/{source_id}/tracks")
 async def upload_tracks(source_id: int, request: Request, files: list[UploadFile] = File(...)):
     s = hub.source(source_id, ("playlist",))
-    for f in files:
-        dest = Path(s["target"]) / _safe_name(f.filename)
-        if dest.exists():
-            raise HTTPException(409, f"{dest.name} is already in {s['name']}; delete it first")
+    dests = [Path(s["target"]) / _safe_name(f.filename) for f in files]
+    clash = next((d for d in dests if d.exists()), None)
+    if clash or len(set(dests)) != len(dests):
+        name = clash.name if clash else "the same file name"
+        raise HTTPException(409, f"{name} is already in {s['name']}; nothing was uploaded")
+    for f, dest in zip(files, dests):
         await _save_upload(f, dest)
     audit(request, f"uploaded {len(files)} track(s) to {s['name']}")
     return {"ok": True}
