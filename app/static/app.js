@@ -171,7 +171,7 @@ function renderLibrary() {
         ${p.tracks.map((t) => `<tr><td>${esc(t)}</td><td class="actions"><button class="icon-btn" data-deltrack="${p.id}" data-track="${esc(t)}" title="Remove">×</button></td></tr>`).join('') || '<tr><td class="muted">Empty. Upload some music.</td></tr>'}
       </tbody></table></div>
       <div class="row" style="margin-top:12px">
-        <label class="field"><span>Add tracks</span><input type="file" accept="audio/*" multiple data-upload="${p.id}"></label>
+        <label class="field"><span>Add tracks</span><input type="file" accept="audio/*,video/*,.caf,.aif,.aiff,.amr,.3gp,.m4a" multiple data-upload="${p.id}"></label>
       </div>
       <div class="row" style="margin-top:12px">${delBtn(p.id, p.name)}</div>
     </div>`).join('') || '<div class="card muted">No playlists yet.</div>';

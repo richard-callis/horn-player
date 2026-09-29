@@ -92,6 +92,17 @@ async def adts_frames(src, downmix="quad", seek=0.0, lead_silence_ms=900):
         drain.cancel()
 
 
+async def to_m4a(src, dst):
+    """Transcode any audio ffmpeg can read (e.g. .caf voice recordings) to AAC in .m4a."""
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(src),
+        "-map", "0:a:0", "-vn", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(dst),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+    _, err = await proc.communicate()
+    if proc.returncode:
+        raise SourceError(err.decode(errors="replace").strip()[-200:] or "not an audio file")
+
+
 async def probe_title(path):
     """Best-effort 'Artist - Title' from a file's tags, falling back to None."""
     proc = await asyncio.create_subprocess_exec(

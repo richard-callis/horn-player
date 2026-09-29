@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
+from . import audio
 from .db import DB
 from .player import AUDIO_EXT, Interrupt, Music, SpeakerPlayer
 from .protect import Protect
@@ -260,18 +261,39 @@ def _safe_name(name):
     return name
 
 
+# Stored as uploaded: formats both ffmpeg and browsers (for clip previews) handle. Anything else
+# (.caf voice recordings, .aiff, .amr, .wma, video files...) is converted to .m4a on upload.
+KEEP_EXT = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac", ".webm"}
+
+
+def _stored_suffix(filename):
+    ext = Path(filename or "").suffix.lower()
+    return ext if ext in KEEP_EXT else ".m4a"
+
+
 async def _save_upload(f: UploadFile, dest: Path):
-    if Path(f.filename or "").suffix.lower() not in AUDIO_EXT:
-        raise HTTPException(400, f"{f.filename}: not a supported audio file")
+    """Write the upload to dest (whose suffix comes from _stored_suffix), converting if needed."""
+    convert = Path(f.filename or "").suffix.lower() not in KEEP_EXT
+    raw = dest.with_name(f".{dest.name}.upload") if convert else dest
     size = 0
-    with dest.open("wb") as out:
-        while chunk := await f.read(1 << 20):
-            size += len(chunk)
-            if size > MAX_UPLOAD:
-                out.close()
-                dest.unlink(missing_ok=True)
-                raise HTTPException(413, f"{f.filename}: larger than {MAX_UPLOAD >> 20} MB")
-            out.write(chunk)
+    try:
+        with raw.open("wb") as out:
+            while chunk := await f.read(1 << 20):
+                size += len(chunk)
+                if size > MAX_UPLOAD:
+                    raise HTTPException(413, f"{f.filename}: larger than {MAX_UPLOAD >> 20} MB")
+                out.write(chunk)
+        if convert:
+            try:
+                await audio.to_m4a(raw, dest)
+            except audio.SourceError:
+                raise HTTPException(400, f"{f.filename}: couldn't read it as audio")
+    except BaseException:
+        dest.unlink(missing_ok=True)
+        raise
+    finally:
+        if convert:
+            raw.unlink(missing_ok=True)
 
 
 class StationReq(BaseModel):
@@ -339,7 +361,8 @@ async def add_playlist(body: NameReq, request: Request):
 @app.post("/api/playlists/{source_id}/tracks")
 async def upload_tracks(source_id: int, request: Request, files: list[UploadFile] = File(...)):
     s = hub.source(source_id, ("playlist",))
-    dests = [Path(s["target"]) / _safe_name(f.filename) for f in files]
+    dests = [Path(s["target"]) / (Path(_safe_name(f.filename)).stem + _stored_suffix(f.filename))
+             for f in files]
     clash = next((d for d in dests if d.exists()), None)
     if clash or len(set(dests)) != len(dests):
         name = clash.name if clash else "the same file name"
@@ -362,7 +385,7 @@ async def delete_track(source_id: int, track: str, request: Request):
 async def add_clip(request: Request, name: str = Form(..., min_length=1, max_length=80),
                    file: UploadFile = File(...)):
     sid = _insert("clip", name, "")
-    dest = DATA / "clips" / f"{sid}{Path(file.filename or '').suffix.lower()}"
+    dest = DATA / "clips" / f"{sid}{_stored_suffix(file.filename)}"
     try:
         await _save_upload(file, dest)
     except HTTPException:
